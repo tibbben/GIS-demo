@@ -1,0 +1,319 @@
+---
+title: "GIS Demonstration"
+author: "Tim Norris"
+date: "2024-02-20"
+output: html_document
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## GIS Demonstration
+
+GIS Demonstration.R 2024, February Tim Norris
+[tnorris\@miami.edu](mailto:tnorris@miami.edu){.email}
+
+------------------------------------------------------------------------
+
+This is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free
+Software Foundation, either version 3 of the License, or any later
+version.
+
+This code is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
+more details. <https://www.gnu.org/licenses/>.
+
+------------------------------------------------------------------------
+
+### Load the needed libraries
+
+```{r}
+# https://leafletjs.com
+library(leaflet)
+# https://r-spatial.github.io/sf/articles/sf1.html
+library(sf)
+library(jqr)
+library(curl)
+library(ggplot2)
+library(dplyr)
+library(spdep)
+library(spatialreg)
+library(spgwr)
+```
+
+### Get the Data
+
+from: <https://gdsc.idsc.miami.edu> explore the metadata at:
+<https://gdsc.idsc.miami.edu/detail/mdc_2021_acs_5yr_tract_dvmt>
+
+```{r}
+base_api_url <- "https://gdsc.idsc.miami.edu/functions/"
+table_name <- "mdc_2021_acs_5yr_tract_dvmt_geojson"
+full_api_url <- paste0(base_api_url,table_name)
+```
+
+| Paste the output from the next line into an empty web browser tab and review
+| the data. -- Try to find the EPSG code -- What are the feature attributes in
+| this data?
+
+```{r}
+print(full_api_url)
+```
+
+#### Read the Data with Curl
+
+Note that EPSG 4269 is the native coordinate reference system:\
+NAD83 lat/lng
+
+```{r include=FALSE}
+# include=FALSE suppresses output
+tracts_json <- curl::curl(full_api_url)
+tracts_geojson <- jqr::jq(tracts_json,'.[]["data"]')
+tracts <- sf::st_read(tracts_geojson,crs='EPSG:4269')
+```
+
+#### Re-project the Data into Needed Coordinate Reference Systems
+
+EPSG 2236: NAD83 State Plane Florida East Feet (for measured
+distances).\
+EPSG 3857: WGS84 Web Mercator (for visualizing in RStudio on the
+internet).
+
+```{r}
+tracts_sp <- sf::st_transform(tracts,crs='EPSG:2236') 
+tracts <- sf::st_transform(tracts,crs='EPSG:4326') # WGS84 lat/lng
+```
+
+#### cleanup
+
+```{r}
+rm(tracts_geojson)
+rm(tracts_json)
+```
+
+### Explore the Data
+
+```{r}
+class(tracts)
+attr(tracts,"sf_column")
+```
+
+| Note the geometry column in the output from the next line
+
+```{r}
+print(tracts[c(1,2,3,4,15)], n=3)
+```
+
+| Take a moment to really look at the list from the next line - lots of data
+| for telling stories here ...
+
+```{r}
+names(tracts)
+```
+
+```{r}
+summary(tracts$median_income_of_residents)
+```
+
+| Note the no data value of -666666666, this 'nodata' number from the US Census
+| Bureau will cause problems. Summarize again ignoring these values ...
+
+```{r}
+tracts$median_income_of_residents <- na_if(
+  tracts$median_income_of_residents,-666666666
+)
+summary(tracts$median_income_of_residents)
+```
+
+| Note the NA's (what do they mean? how can we control for this?)
+
+#### Summarize some Other Columns
+
+```{r}
+summary(tracts$total_population)
+```
+
+| Note that some variables need to be normalized (why??)
+| Normalize by total population.
+
+```{r}
+summary(tracts$white_alone)
+summary(tracts$white_alone/tracts$total_population)
+```
+
+| Normalize by total_housing_units
+
+```{r}
+summary(tracts$households_below_poverty_level)
+summary(tracts$total_housing_units)
+summary(tracts$households_below_poverty_level/tracts$total_housing_units)
+```
+
+| Note the NA's (what do they mean? how can we control for this?)
+| Also note the Max is greater than 1!! For a normalized value this cannot be!!
+| There must be an error either in how it was normalized or in the actual counts.
+
+### Make an Income Map (Choropleth)
+
+First set some color bins for the data.\
+Note first 'palette' parameter comes from <https://colorbrewer2.org>.\
+You can experiment with different palettes.
+
+```{r}
+median_income_pal <- colorBin(
+  palette = "YlGnBu",                        # color ramp
+  tracts$median_income_of_residents,         # data column
+  7                                          # number of bins
+)
+```
+
+Set output dimension
+
+```{r}
+output.height <- '800px'
+```
+
+Create map object
+
+```{r}
+m_median_income <- leaflet(height=800) %>%
+  addTiles() %>% # Add default OpenStreetMap map tiles
+  addPolygons(
+    data = tracts,
+    fillColor = ~median_income_pal(median_income_of_residents),
+    fillOpacity = 0.8,
+    weight = 0.3,
+    label = ~paste('median income in US$: ',median_income_of_residents),
+    labelOptions = labelOptions(style = list(
+      "font-weight" = "normal",
+      padding = "3px 8px"),
+      textsize = "13px", direction = "auto"),
+    highlight = highlightOptions(color = "black", weight = 4, bringToFront = TRUE))
+
+# draw the map
+m_median_income
+```
+
+| Take a moment to explore. Note the mouse-over value, what is it (label)?
+| -- edit some of the parameters and rerun the code to see changes
+| -- find the needed changes to add a popup on click
+
+### Make a Race Map (Choropleth)
+
+Make a normalized column (percentages better for maps).
+
+```{r}
+tracts$percent_white <- tracts$white_alone/tracts$total_population
+```
+
+First set some color bins for the data.
+
+```{r}
+percent_white_pal <- colorBin(
+  "OrRd", 
+  tracts$percent_white, 
+  7)
+```
+
+Set output dimension
+
+```{r}
+output.height <- '800px'
+```
+
+Create map object.
+
+```{r}
+m_percent_white <- leaflet(height=800) %>%
+  addTiles() %>% # Add default OpenStreetMap map tiles
+  addPolygons(
+    data = tracts,
+    fillColor = ~percent_white_pal(tracts$percent_white),
+    fillOpacity = 0.8,
+    weight = 0.3,
+    label = ~paste('percent white: ',tracts$percent_white),
+    labelOptions = labelOptions(style = list(
+      "font-weight" = "normal",
+      padding = "3px 8px"),
+      textsize = "13px", direction = "auto"),
+    popup = ~paste('<strong>white_alone:',white_alone,'</strong><br>Total Pop:',total_population),
+    highlight = highlightOptions(color = "black", weight = 4, bringToFront = TRUE))
+
+# draw the map
+m_percent_white
+```
+
+| Take a moment to explore, does this match your expectations?
+| Is there anything that does or does not surprise you?
+
+### Basic Linear Model: median_income \~ percent_white
+
+We will model median income as a function of percent white.\
+What do you expect this model to look like? Which way will the\
+correlation be sloped?
+
+Make a linear regression model and look at the summary.
+
+```{r}
+nonspatial <- lm(percent_white~median_income_of_residents,data=tracts)
+summary(nonspatial)
+```
+
+It looks like we have a strong relationship!! The p-values for the
+intercept and percent_with predictor are very low.
+
+Make a plot of the basic linear model.
+
+```{r}
+options(repr.plot.width = 8, repr.plot.height = 8)
+plot(tracts$percent_white,tracts$median_income_of_residents)
+abline(nonspatial, col="red")
+```
+
+| Take a moment to check-in - does this meet your expectations or hypothesis?
+
+Make a basic q-q plot.
+
+```{r}
+qqnorm(nonspatial$residuals)
+```
+
+| For a q-q plot if the line is not perfectly diagonal, we may be breaking
+| some basic assumptions about linear models; specifically our data does
+| not have a normal distribution.
+
+Calculate the residuals
+
+```{r}
+x = data.frame(
+  actual = nonspatial$fitted.values + nonspatial$residuals,
+  fitted = nonspatial$fitted.values)
+x = x[order(x$fitted),]
+```
+
+Make a quick plot of the residuals
+
+```{r}
+plot(x$actual, col='#00000040', ylab="percent white", las=1)
+lines(x$fitted, col='#c00000', lwd=3)
+```
+
+#### INTERPRETATION
+
+The model suggests a relationship between percent white and median
+income exists,\
+BUT The R-squared suggests only 15% of explanation, seems that there is
+a lot\
+of other stuff going on as well. This lack of explanation is also shown
+in the\
+residual plot directly above (not tightly clustered). The Q-Q plot
+suggests a\
+distribution that is skewed to the right.
+
+### 
